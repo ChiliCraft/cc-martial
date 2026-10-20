@@ -181,26 +181,31 @@ final class AffixService {
     private void heartbeat() {
         passiveTick++;
         for (Player player : plugin.getServer().getOnlinePlayers()) {
-            for (AffixContent.AffixDef def : equippedAffixes(player, AffixHook.PASSIVE)) {
-                String potionName = def.tag("potion", "");
-                if (!potionName.isEmpty()) {
-                    PotionEffectType type = Registry.EFFECT.get(NamespacedKey.minecraft(potionName.toLowerCase(Locale.ROOT)));
-                    if (type != null) {
-                        // 时长覆盖下次心跳（80t > 40t），无粒子闪烁
-                        player.addPotionEffect(new PotionEffect(
-                                type, 80, (int) def.param("amplifier", 0), true, false, true));
+            // 逐玩家隔离：单人异常不影响同轮其它玩家（对应文档性能红线「单任务单句柄 + 逐玩家 try-catch」）
+            try {
+                for (AffixContent.AffixDef def : equippedAffixes(player, AffixHook.PASSIVE)) {
+                    String potionName = def.tag("potion", "");
+                    if (!potionName.isEmpty()) {
+                        PotionEffectType type = Registry.EFFECT.get(NamespacedKey.minecraft(potionName.toLowerCase(Locale.ROOT)));
+                        if (type != null) {
+                            // 时长覆盖下次心跳（80t > 40t），无粒子闪烁
+                            player.addPotionEffect(new PotionEffect(
+                                    type, 80, (int) def.param("amplifier", 0), true, false, true));
+                        }
+                    }
+                    double heal = def.param("heal", 0);
+                    if (heal > 0) {
+                        healPlayer(player, heal);
+                    }
+                    double absorbEvery = def.param("every", 0);
+                    double absorb = def.param("absorption", 0);
+                    if (absorb > 0 && absorbEvery > 0 && passiveTick % (int) absorbEvery == 0) {
+                        // 黄心封顶 4 颗，避免无限叠加
+                        player.setAbsorptionAmount(Math.min(4.0, player.getAbsorptionAmount() + absorb));
                     }
                 }
-                double heal = def.param("heal", 0);
-                if (heal > 0) {
-                    healPlayer(player, heal);
-                }
-                double absorbEvery = def.param("every", 0);
-                double absorb = def.param("absorption", 0);
-                if (absorb > 0 && absorbEvery > 0 && passiveTick % (int) absorbEvery == 0) {
-                    // 黄心封顶 4 颗，避免无限叠加
-                    player.setAbsorptionAmount(Math.min(4.0, player.getAbsorptionAmount() + absorb));
-                }
+            } catch (RuntimeException exception) {
+                logger.warn("词缀心跳处理玩家 " + player.getName() + " 时出错：" + exception);
             }
         }
     }
@@ -218,14 +223,26 @@ final class AffixService {
 
     /** 按 hook 决定扫描槽位（约定见 {@link AffixHook}） */
     private List<ItemStack> scannedItems(Player player, AffixHook hook) {
-        if (hook == AffixHook.ATTACK || hook == AffixHook.KILL) {
-            return List.of(player.getInventory().getItemInMainHand());
+        // 空护甲槽返回 null，而 List.of 不接受 null 元素：
+        // 只要玩家缺任意一件护甲，词缀心跳每 2 秒抛一次 NPE，所以这里逐个收集并跳过 null
+        List<ItemStack> items = new ArrayList<>(5);
+        ItemStack mainHand = player.getInventory().getItemInMainHand();
+        if (mainHand != null) {
+            items.add(mainHand);
         }
-        return List.of(player.getInventory().getItemInMainHand(),
+        if (hook == AffixHook.ATTACK || hook == AffixHook.KILL) {
+            return items;
+        }
+        for (ItemStack armor : new ItemStack[]{
                 player.getInventory().getHelmet(),
                 player.getInventory().getChestplate(),
                 player.getInventory().getLeggings(),
-                player.getInventory().getBoots());
+                player.getInventory().getBoots()}) {
+            if (armor != null) {
+                items.add(armor);
+            }
+        }
+        return items;
     }
 
     /** 物品 PDC 词缀标记原文（无标记返回 null） */
